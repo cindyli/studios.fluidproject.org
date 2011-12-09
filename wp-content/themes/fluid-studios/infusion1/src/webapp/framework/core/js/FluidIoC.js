@@ -212,7 +212,7 @@ var fluid_1_5 = fluid_1_5 || {};
     }
      
     function makeStackResolverOptions(instantiator, parentThat, localRecord, expandOptions) {
-        return $.extend({}, fluid.defaults("fluid.resolveEnvironment"), {
+        return $.extend(true, {}, fluid.defaults("fluid.resolveEnvironment"), {
             fetcher: makeStackFetcher(instantiator, parentThat, localRecord, expandOptions)
         }); 
     }
@@ -478,6 +478,16 @@ outer:  for (var i = 0; i < exist.length; ++i) {
         }
     }
     
+    var isDemandLogging = false;
+    fluid.setDemandLogging = function(set) {
+        isDemandLogging = set;  
+    };
+    
+    // unsupported, non-API function
+    fluid.isDemandLogging = function(demandingNames) {
+        return isDemandLogging && fluid.isLogging() && demandingNames[0] !== "fluid.threadLocal";
+    };
+    
     fluid.demands = function(demandingName, contextName, spec) {
         var contextNames = $.makeArray(contextName).sort(); 
         if (!spec) {
@@ -486,7 +496,7 @@ outer:  for (var i = 0; i < exist.length; ++i) {
         else if (spec.length) {
             spec = {args: spec};
         }
-        if (fluid.getCallerInfo) {
+        if (fluid.getCallerInfo && fluid.isDemandLogging()) {
             var callerInfo = fluid.getCallerInfo(5);
             if (callerInfo) {
                 spec.registeredFrom = callerInfo;
@@ -504,16 +514,6 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     fluid.compareDemands = function(speca, specb) {
         var p1 = speca.uncess - specb.uncess;
         return p1 === 0? specb.intersect - speca.intersect : p1;
-    };
-    
-    var isDemandLogging = false;
-    fluid.setDemandLogging = function(set) {
-        isDemandLogging = set;  
-    };
-    
-    // unsupported, non-API function
-    fluid.isDemandLogging = function(demandingNames) {
-        return isDemandLogging && fluid.isLogging() && demandingNames[0] !== "fluid.threadLocal";
     };
     
     // unsupported, non-API function
@@ -632,7 +632,7 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     fluid.makeFreeInvoker = function(functionName, environment) {
         var demandSpec = fluid.determineDemands(fluid.freeInstantiator, null, functionName);
         return function() {
-            var invokeSpec = fluid.embodyDemands(fluid.freeInstantiator, null, demandSpec, arguments, {passArgs: true});
+            var invokeSpec = fluid.embodyDemands(fluid.freeInstantiator, null, demandSpec, fluid.makeArray(arguments), {passArgs: true});
             return fluid.invokeGlobalFunction(invokeSpec.funcName, invokeSpec.args, environment);
         };
     };
@@ -640,7 +640,7 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     fluid.makeInvoker = function(instantiator, that, demandspec, functionName, environment) {
         demandspec = demandspec || fluid.determineDemands(instantiator, that, functionName);
         return function() {
-            var args = arguments;
+            var args = fluid.makeArray(arguments);
             return fluid.pushActivity(function() {
                 var invokeSpec = fluid.embodyDemands(instantiator, that, demandspec, args, {passArgs: true});
                 return fluid.invokeGlobalFunction(invokeSpec.funcName, invokeSpec.args, environment);
@@ -673,13 +673,13 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     fluid.event.dispatchListener = function(instantiator, that, listener, eventName, eventSpec, indirectArgs) {
         return fluid.wrapActivity(function() {
             listener = fluid.event.resolveListener(listener); // just resolves globals
-            var args = indirectArgs? arguments[0] : arguments;
+            var args = indirectArgs? arguments[0] : fluid.makeArray(arguments);
             var demandspec = fluid.determineDemands(instantiator, that, eventName);
             if (demandspec.args.length === 0 && eventSpec.args) {
                 demandspec.args = eventSpec.args;
             }
             var resolved = fluid.embodyDemands(instantiator, that, demandspec, args, {passArgs: true, componentOptions: eventSpec}); 
-            listener.apply(null, resolved.args);
+            return listener.apply(null, resolved.args);
         }, [" firing to listener to event named " + eventName + " of ", that]);
     };
     
@@ -757,7 +757,7 @@ outer:  for (var i = 0; i < exist.length; ++i) {
                 var firer = {typeName: "fluid.event.firer"}; // jslint:ok - already defined
                 fluid.each(["fire", "removeListener"], function(method) {
                     firer[method] = function() {
-                        var outerArgs = arguments;
+                        var outerArgs = fluid.makeArray(arguments);
                         return fluid.applyInstantiator(instantiator, that, function() {
                             return origin[method].apply(null, outerArgs);
                         });
@@ -1058,19 +1058,14 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     
     // fluid.environmentalRoot.environmentClass = fluid.typeTag("fluid.rhino");
     
-    fluid.demands("fluid.threadLocal", "fluid.browser", {funcName: "fluid.singleThreadLocal"});
-
     var singleThreadLocal = fluid.typeTag("fluid.dynamicEnvironment");
     
     fluid.singleThreadLocal = function() {
         return singleThreadLocal;
     };
 
-    fluid.threadLocal = function() {
-        // quick implementation since this is not very dynamic, a hazard to debugging, and used frequently within IoC itself
-        var demands = fluid.locateDemands(fluid.freeInstantiator, null, ["fluid.threadLocal"]);
-        return fluid.invokeGlobalFunction(demands.funcName, arguments);
-    };
+    // Return to the old strategy of monkey-patching this, since this is a most frequently used function within IoC
+    fluid.threadLocal = fluid.singleThreadLocal;
 
     function applyLocalChange(applier, type, path, value) {
         var change = {
@@ -1163,7 +1158,7 @@ outer:  for (var i = 0; i < exist.length; ++i) {
         if (!base) {
             return base;
         }
-        return fluid.get(base, parsed.path);
+        return parsed.noDereference? parsed.path: fluid.get(base, parsed.path);
     };
     
     // unsupported, non-API function
@@ -1239,7 +1234,8 @@ outer:  for (var i = 0; i < exist.length; ++i) {
     fluid.resolveEnvironment = function(obj, options) {
         // Don't create a component here since this function is itself used in the 
         // component expansion pathway - avoid all expansion in any case to head off FLUID-4301
-        options = $.extend(true, {}, fluid.rawDefaults("fluid.resolveEnvironment"), options);
+        options = $.extend({}, fluid.rawDefaults("fluid.resolveEnvironment"), options);
+        options.seenIds = {};
         return resolveEnvironmentImpl(obj, options);
     };
 
